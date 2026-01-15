@@ -1,0 +1,79 @@
+name: Weather Data Pipeline - Auto Crawl to Supabase
+
+# Trigger: 
+# - Hàng ngày lúc 01:00 UTC (08:00 AM giờ Hà Nội)
+# - Có thể trigger thủ công từ tab Actions
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 1 AM UTC mỗi ngày
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  crawl_and_sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480     # 8 giờ tối đa (cho crawl 63 tỉnh nếu bị rate limit)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Create .env from GitHub Secrets
+        run: |
+          cat > .env << EOF
+          SUPABASE_HOST=${{ secrets.SUPABASE_HOST }}
+          SUPABASE_PORT=${{ secrets.SUPABASE_PORT }}
+          SUPABASE_DB=${{ secrets.SUPABASE_DB }}
+          SUPABASE_USER=${{ secrets.SUPABASE_USER }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          EOF
+          chmod 600 .env
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "Warning: requirements.txt not found, using minimal install"
+            pip install pandas requests psycopg2-binary python-dotenv
+          fi
+
+      - name: Run Weather Crawl & Sync to Supabase
+        id: crawl
+        run: python main.py
+        env:
+          PYTHONUNBUFFERED: 1   # Để log realtime
+        continue-on-error: true
+
+      - name: Check execution status
+        if: always()
+        run: |
+          echo "## Pipeline Status Report"
+          echo ""
+          echo "- **Workflow Run**: ${{ github.run_number }}"
+          echo "- **Date**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "- **Trigger**: ${{ github.event_name }}"
+          echo ""
+          echo "### Main Step Result"
+          echo "- Crawl & Supabase Sync: ${{ steps.crawl.outcome }}"
+          echo ""
+          echo "### Notes"
+          echo "- Nếu outcome là 'failure' hoặc 'cancelled', kiểm tra log để xem lỗi."
+          echo "- Lỗi phổ biến: RATE_LIMIT_HARD → chờ 1-3 giờ rồi trigger lại thủ công."
+          echo "- Dữ liệu được đẩy trực tiếp vào bảng data_raw trên Supabase."
+          echo "- Không tạo file local CSV/DuckDB nữa."
+
+      - name: Notify on failure (console log)
+        if: failure()
+        run: |
+          echo "⚠ PIPELINE FAILED!"
+          echo "Kiểm tra log chi tiết ở bước 'Run Weather Crawl & Sync to Supabase'"
+          echo "Nếu gặp RATE_LIMIT_HARD: Trigger lại thủ công sau vài giờ."
